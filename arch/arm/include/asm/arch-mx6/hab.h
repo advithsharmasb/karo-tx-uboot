@@ -14,6 +14,8 @@
 #include <asm/arch/sys_proto.h>
 
 int get_hab_status(void);
+int imx_hab_authenticate_image(uint32_t ddr_start, uint32_t image_size,
+			       uint32_t ivt_offset);
 
 /* -------- start of HAB API updates ------------*/
 /* The following are taken from HAB4 SIS */
@@ -280,6 +282,13 @@ static inline rt hab_rvt_##n(t1 p1, t2 p2, t3 p3, t4 p4, t5 p5)		\
 #else /* CONFIG_SECURE_BOOT */
 
 static inline int get_hab_status(void)
+{
+	return 0;
+}
+
+static inline int imx_hab_authenticate_image(uint32_t ddr_start,
+					       uint32_t image_size,
+					       uint32_t ivt_offset)
 {
 	return 0;
 }

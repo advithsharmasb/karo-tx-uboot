@@ -5,6 +5,8 @@
  */
 
 #include <common.h>
+#include <image.h>
+#include <libfdt.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/arch/clock.h>
@@ -447,4 +449,334 @@ U_BOOT_CMD(
 		"addr len [type]\n"
 		"\t\taddr -\taddress to verify\n"
 		"\t\tlen -\tlength of addr range to verify\n"
+	  );
+
+#define IVT_HEADER_MAGIC	0xD1
+#define IVT_TOTAL_LENGTH	0x20
+#define HAB_CMD_HDR		0xD4
+#define HAB_CMD_WRT_DAT		0xCC
+#define HAB_CMD_CHK_DAT		0xCF
+#define HAB_CMD_SET		0xB1
+#define HAB_PAR_MID		0x01
+#define HAB_MAJ_VER		0x40
+#define HAB_MAJ_MASK		0xF0
+
+#define MX6DQ_PU_IROM_MMU_EN_VAR	0x009024a8
+#define MX6DLS_PU_IROM_MMU_EN_VAR	0x00901dd0
+#define MX6SL_PU_IROM_MMU_EN_VAR	0x00901c60
+
+struct ivt_header {
+	uint8_t		magic;
+	uint16_t	length;
+	uint8_t		version;
+} __attribute__((packed));
+
+struct ivt {
+	struct ivt_header hdr;
+	uint32_t entry;
+	uint32_t reserved1;
+	uint32_t dcd;
+	uint32_t boot;
+	uint32_t self;
+	uint32_t csf;
+	uint32_t reserved2;
+};
+
+struct hab_hdr {
+	uint8_t tag;
+	uint8_t len[2];
+	uint8_t par;
+} __attribute__((packed));
+
+static inline size_t get_hab_hdr_len(struct hab_hdr *hdr)
+{
+	return (size_t)((hdr->len[0] << 8) + hdr->len[1]);
+}
+
+static inline int chk_bounds(uint8_t *addr, size_t bytes, uint8_t *start, uint8_t *end)
+{
+	size_t csf_size = (size_t)((end + 1) - addr);
+
+	return (addr && (addr >= start) && (addr <= end) &&
+		(csf_size >= bytes));
+}
+
+static inline size_t get_csf_cmd_hdr_len(uint8_t *csf_hdr)
+{
+	if (*csf_hdr == HAB_CMD_HDR)
+		return sizeof(struct hab_hdr);
+
+	return get_hab_hdr_len((struct hab_hdr *)csf_hdr);
+}
+
+static bool csf_is_valid(struct ivt *ivt, ulong start_addr, size_t bytes)
+{
+	uint8_t *start = (uint8_t *)start_addr;
+	uint8_t *csf_hdr;
+	uint8_t *end;
+	size_t csf_hdr_len;
+	size_t cmd_hdr_len;
+	size_t offset = 0;
+
+	if (bytes != 0)
+		end = start + bytes - 1;
+	else
+		end = start;
+
+	if (!ivt->csf) {
+		puts("Error: CSF pointer is NULL\n");
+		return false;
+	}
+
+	csf_hdr = (uint8_t *)(ulong)ivt->csf;
+
+	if (*csf_hdr != HAB_CMD_HDR) {
+		printf("Error: CSF header command (0x%02x) not found at 0x%08x\n",
+		       *csf_hdr, ivt->csf);
+		return false;
+	}
+
+	csf_hdr_len = get_hab_hdr_len((struct hab_hdr *)csf_hdr);
+
+	if (!chk_bounds(csf_hdr, csf_hdr_len, start, end)) {
+		puts("Error: CSF lies outside the image bounds\n");
+		return false;
+	}
+
+	do {
+		struct hab_hdr *cmd = (struct hab_hdr *)&csf_hdr[offset];
+
+		switch (cmd->tag) {
+		case HAB_CMD_WRT_DAT:
+			puts("Error: Deprecated write command found in CSF\n");
+			return false;
+		case HAB_CMD_CHK_DAT:
+			puts("Error: Deprecated check command found in CSF\n");
+			return false;
+		case HAB_CMD_SET:
+			if (cmd->par == HAB_PAR_MID) {
+				puts("Error: Deprecated Set MID command found in CSF\n");
+				return false;
+			}
+			break;
+		default:
+			break;
+		}
+
+		cmd_hdr_len = get_csf_cmd_hdr_len(&csf_hdr[offset]);
+		if (!cmd_hdr_len) {
+			puts("Error: Invalid command length in CSF\n");
+			return false;
+		}
+		offset += cmd_hdr_len;
+	} while (offset < csf_hdr_len);
+
+	return true;
+}
+
+static int verify_ivt_header(struct ivt_header *ivt_hdr)
+{
+	if (ivt_hdr->magic != IVT_HEADER_MAGIC) {
+		printf("Error: bad IVT magic (0x%02x, expected 0x%02x)\n",
+		       ivt_hdr->magic, IVT_HEADER_MAGIC);
+		return 1;
+	}
+
+	if (be16_to_cpu(ivt_hdr->length) != IVT_TOTAL_LENGTH) {
+		printf("Error: bad IVT length (0x%04x, expected 0x%04x)\n",
+		       be16_to_cpu(ivt_hdr->length), IVT_TOTAL_LENGTH);
+		return 1;
+	}
+
+	if ((ivt_hdr->version & HAB_MAJ_MASK) != HAB_MAJ_VER) {
+		printf("Error: bad IVT version (0x%02x, expected 0x4X)\n",
+		       ivt_hdr->version);
+		return 1;
+	}
+
+	return 0;
+}
+
+static int validate_ivt(struct ivt *ivt_initial)
+{
+	struct ivt_header *ivt_hdr = &ivt_initial->hdr;
+
+	if ((ulong)ivt_initial & 0x3) {
+		puts("Error: IVT address is not 4-byte aligned\n");
+		return 0;
+	}
+
+	if (verify_ivt_header(ivt_hdr))
+		return 0;
+
+	if (ivt_initial->entry == 0x0) {
+		puts("Error: IVT entry pointer is 0\n");
+		return 0;
+	}
+	if (ivt_initial->self != (uint32_t)((ulong)ivt_initial & 0xffffffff)) {
+		printf("Error: IVT self pointer (0x%08x) does not match IVT addr (0x%08lx)\n",
+		       ivt_initial->self, (ulong)ivt_initial);
+		return 0;
+	}
+	if (ivt_initial->csf == 0x0) {
+		puts("Error: IVT CSF pointer is 0\n");
+		return 0;
+	}
+	if (ivt_initial->dcd != 0x0) {
+		puts("Error: DCD pointer must be 0 for secondary images\n");
+		return 0;
+	}
+
+	return 1;
+}
+
+static ulong get_image_ivt_offset(ulong img_addr)
+{
+	const image_header_t *hdr = (const image_header_t *)img_addr;
+
+	if (image_check_magic(hdr)) {
+		ulong raw_size = image_get_image_size(hdr);
+		return (raw_size + 0x1000 - 1) & ~(0x1000 - 1);
+	}
+
+	if (fdt_check_header((const void *)img_addr) == 0) {
+		ulong raw_size = fdt_totalsize((const void *)img_addr);
+		return (raw_size + 0x1000 - 1) & ~(0x1000 - 1);
+	}
+
+	return 0;
+}
+
+int imx_hab_authenticate_image(uint32_t ddr_start, uint32_t image_size,
+			       uint32_t ivt_offset)
+{
+	ulong load_addr = 0;
+	size_t bytes;
+	ulong ivt_addr = 0;
+	ulong start;
+	struct ivt *ivt;
+	enum hab_status status;
+	int events;
+
+	if (!is_hab_enabled()) {
+		puts("HAB: secure boot fuse not enabled\n");
+		return 1;
+	}
+
+	printf("\nHAB: Authenticating image at 0x%08x (size 0x%x, ivt_offset 0x%x)...\n",
+	       ddr_start, image_size, ivt_offset);
+
+	hab_caam_clock_enable(1);
+
+	/* Calculate IVT address header */
+	ivt_addr = (ulong)(ddr_start + ivt_offset);
+	ivt = (struct ivt *)ivt_addr;
+
+	/* Verify IVT structure */
+	if (!validate_ivt(ivt)) {
+		puts("HAB: IVT validation failed\n");
+		return 1;
+	}
+
+	start = ddr_start;
+	bytes = image_size;
+
+	/* Verify CSF structure */
+	if (!csf_is_valid(ivt, start, bytes)) {
+		puts("HAB: CSF validation failed\n");
+		return 1;
+	}
+
+	if (hab_rvt_entry() != HAB_SUCCESS) {
+		puts("HAB: hab_rvt_entry failed\n");
+		get_hab_status();
+		return 1;
+	}
+
+	status = hab_rvt_check_target(HAB_TGT_MEMORY, (void *)(ulong)ddr_start, bytes);
+	if (status != HAB_SUCCESS) {
+		printf("HAB: check_target failed for 0x%08x-0x%08lx\n",
+		       ddr_start, ddr_start + (ulong)bytes);
+		hab_rvt_exit();
+		get_hab_status();
+		return 1;
+	}
+
+	/*
+	 * Notify ROM code if MMU is enabled so it flushes caches properly.
+	 */
+	if (get_cr() & CR_M) {
+		flush_dcache_all();
+		if (is_cpu_type(MXC_CPU_MX6Q) || is_cpu_type(MXC_CPU_MX6D)) {
+			writel(1, MX6DQ_PU_IROM_MMU_EN_VAR);
+		} else if (is_cpu_type(MXC_CPU_MX6DL) || is_cpu_type(MXC_CPU_MX6SOLO)) {
+			writel(1, MX6DLS_PU_IROM_MMU_EN_VAR);
+		} else if (is_cpu_type(MXC_CPU_MX6SL)) {
+			writel(1, MX6SL_PU_IROM_MMU_EN_VAR);
+		}
+	}
+
+	load_addr = (ulong)hab_rvt_authenticate_image(
+			HAB_CID_UBOOT,
+			ivt_offset,
+			(void **)&start,
+			(size_t *)&bytes,
+			NULL);
+
+	if (hab_rvt_exit() != HAB_SUCCESS) {
+		puts("HAB: hab_rvt_exit failed\n");
+		load_addr = 0;
+	}
+
+	events = get_hab_status();
+
+	if (load_addr == 0 || events > 0) {
+		printf("HAB: Image authentication FAILED (load_addr=0x%lx, events=%d)\n",
+		       load_addr, events);
+		return 1;
+	}
+
+	printf("HAB: Image authentication SUCCESS (entry=0x%08lx)\n", load_addr);
+	return 0;
+}
+
+static int do_authenticate_image(cmd_tbl_t *cmdtp, int flag, int argc,
+				 char *const argv[])
+{
+	ulong addr, length, ivt_offset;
+	int rcode;
+
+	if (argc < 3)
+		return CMD_RET_USAGE;
+
+	addr = simple_strtoul(argv[1], NULL, 16);
+	length = simple_strtoul(argv[2], NULL, 16);
+
+	if (argc == 3) {
+		ivt_offset = get_image_ivt_offset(addr);
+		if (ivt_offset == 0) {
+			printf("Error: Could not automatically determine IVT offset for image at 0x%08lx.\n"
+			       "Please specify ivt_offset as 3rd parameter: hab_auth_img <addr> <length> <ivt_offset>\n",
+			       addr);
+			return CMD_RET_FAILURE;
+		}
+		printf("HAB: Auto-detected IVT offset 0x%08lx\n", ivt_offset);
+	} else {
+		ivt_offset = simple_strtoul(argv[3], NULL, 16);
+	}
+
+	rcode = imx_hab_authenticate_image(addr, length, ivt_offset);
+	if (rcode == 0)
+		return CMD_RET_SUCCESS;
+
+	return CMD_RET_FAILURE;
+}
+
+U_BOOT_CMD(
+		hab_auth_img, 4, 0, do_authenticate_image,
+		"authenticate image via HAB",
+		"addr length [ivt_offset]\n"
+		"    addr - image hex address in RAM\n"
+		"    length - total image length (image + IVT + CSF)\n"
+		"    ivt_offset - hex offset of IVT in the image (optional for uImage/DTB)"
 	  );
