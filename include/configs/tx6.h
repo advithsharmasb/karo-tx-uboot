@@ -160,7 +160,11 @@
 #endif
 #define CONFIG_ZERO_BOOTDELAY_CHECK
 #define CONFIG_SYS_AUTOLOAD		"no"
+#ifdef CONFIG_SECURE_BOOT
+#define DEFAULT_BOOTCMD			"run bootcmd_${boot_mode} auth_kernel bootm_cmd"
+#else
 #define DEFAULT_BOOTCMD			"run bootcmd_${boot_mode} bootm_cmd"
+#endif
 #define CONFIG_BOOTFILE			"uImage"
 #define CONFIG_BOOTARGS			"init=/linuxrc console=ttymxc0,115200 ro debug panic=1"
 #ifndef CONFIG_TX6_UBOOT_MFG
@@ -231,6 +235,8 @@
 	";run bootargs_nfs"						\
 	";dhcp\0"							\
 	"bootm_cmd=bootm ${loadaddr} - ${fdtaddr}\0"			\
+	"auth_kernel=hab_auth_img ${loadaddr} ${filesize}\0"		\
+	"auth_fdt=hab_auth_img ${fdtaddr} ${filesize}\0"		\
 	"boot_mode=" CONFIG_SYS_DEFAULT_BOOT_MODE "\0"			\
 	"cpu_clk=" CONFIG_SYS_CPU_CLK_STR "\0"				\
 	"default_bootargs=setenv bootargs " CONFIG_BOOTARGS		\
