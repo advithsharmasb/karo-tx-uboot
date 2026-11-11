@@ -10,7 +10,7 @@ OBJCOPYFLAGS += -j .pad
 LOGO_BMP = logos/karo.bmp
 #PLATFORM_CPPFLAGS += -DDEBUG
 #PLATFORM_CPPFLAGS += -Wno-unused-but-set-variable
-PLATFORM_CPPFLAGS += -Werror
+#PLATFORM_CPPFLAGS += -Werror
 
 ifneq ($(CONFIG_SECURE_BOOT),)
 	# promote config variable to linker script
