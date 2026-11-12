@@ -659,8 +659,8 @@ int imx_hab_authenticate_image(uint32_t ddr_start, uint32_t image_size,
 	int events;
 
 	if (!is_hab_enabled()) {
-		puts("HAB: secure boot fuse not enabled\n");
-		return 1;
+		puts("HAB: secure boot not enabled (open mode) - authentication bypassed\n");
+		return 0;
 	}
 
 	printf("\nHAB: Authenticating image at 0x%08x (size 0x%x, ivt_offset 0x%x)...\n",
